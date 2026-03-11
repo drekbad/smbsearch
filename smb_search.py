@@ -1,22 +1,19 @@
+import argparse
 import multiprocessing
 import os
 import re
 from impacket.smbconnection import SMBConnection, SessionError
 from impacket.smb3structs import FILE_READ_DATA
 
-# Customize these
-targets = ['IP1:share1', 'IP2:share2']  # e.g., ['192.168.1.10:Data', '192.168.1.20:Files']
+# Fixed configs (customize if needed)
 keywords = ['password', 'login', 'username']
 ad_accounts = ['admin', 'enterpriseadmin', 'domainadmin']  # Add your key AD names
 false_positive_exts = ['.js', '.html', '.css', '.json']  # Skip likely FP files
-username = 'your_provisioned_username'  # Or '' for anon if applicable
-password = 'your_provisioned_password'
-domain = 'domain.local'
-max_depth = 5  # Limit recursion to avoid infinite loops
-pool_size = 4  # Adjust based on your CPU/network
+max_depth = 5  # Limit recursion
+pool_size = 4  # Adjust based on CPU/network
 
-def search_share(target):
-    ip, share = target.split(':')
+def search_share(args):
+    ip, share, username, password, domain = args
     hits = []
     conn = None
     try:
@@ -40,37 +37,50 @@ def search_share(target):
                         for kw in keywords + ad_accounts:
                             if kw in fname:
                                 hits.append(f"FILENAME HIT: {full_path} (keyword: {kw})")
-                                break  # Early break if hit
-                        # Content check (only if not FP ext and read access)
+                                break
+                        # Content check
                         ext = os.path.splitext(fname)[1].lower()
                         if ext not in false_positive_exts:
                             try:
                                 with conn.openFile(share, full_path, FILE_READ_DATA) as fd:
                                     content = fd.read().decode('utf-8', errors='ignore').lower()
                                     for kw in keywords + ad_accounts:
-                                        # Smart filter: kw followed by : or = with value (not just isolated word)
                                         pattern = re.compile(rf'{re.escape(kw)}\s*[:=]\s*[^ \t\n\r\f\v]+')
                                         matches = pattern.findall(content)
                                         if matches:
-                                            snippet = matches[0][:50]  # Truncate for log
+                                            snippet = matches[0][:50]
                                             hits.append(f"CONTENT HIT: {full_path} (keyword: {kw}, snippet: {snippet})")
                                             break
                             except SessionError:
-                                pass  # Skip unreadable files
+                                pass
             except SessionError:
-                pass  # Skip inaccessible dirs
+                pass
 
         recurse('')
     except Exception as e:
-        hits.append(f"ERROR on {target}: {str(e)}")
+        hits.append(f"ERROR on {ip}:{share}: {str(e)}")
     finally:
         if conn:
             conn.logoff()
     return hits
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='SMB Share Searcher')
+    parser.add_argument('--username', required=True, help='Username for SMB login')
+    parser.add_argument('--password', required=True, help='Password for SMB login')
+    parser.add_argument('--domain', required=True, help='Domain for SMB login')
+    parser.add_argument('--targets_file', required=True, help='File with IP:share lines')
+    args = parser.parse_args()
+
+    # Read targets from file
+    with open(args.targets_file, 'r') as f:
+        targets = [line.strip() for line in f if line.strip()]
+
+    # Prepare args for each target
+    pool_args = [(target.split(':')[0], target.split(':')[1], args.username, args.password, args.domain) for target in targets]
+
     with multiprocessing.Pool(pool_size) as pool:
-        results = pool.map(search_share, targets)
+        results = pool.map(search_share, pool_args)
     for result in results:
         for hit in result:
             print(hit)
